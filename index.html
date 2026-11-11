@@ -22,6 +22,7 @@
   <tbody id="rows"></tbody>
 </table>
 <p id="pred"></p>
+<div id="daily"></div>
 
 <script>
 // 내 컴퓨터(localhost)에서 열면 로컬 백엔드, 그 외(Vercel 등)에서 열면 Railway 백엔드
@@ -64,10 +65,22 @@ async function load() {
 document.addEventListener("click", async (ev) => {
   const st = ev.target.dataset && ev.target.dataset.st;
   if (!st) return;
-  const p = await fetch(`${API}/air/predict?station=${encodeURIComponent(st)}`).then((r) => r.json());
+  const q = encodeURIComponent(st);
+  const [p, d] = await Promise.all([
+    fetch(`${API}/air/predict?station=${q}`).then((r) => r.json()),
+    fetch(`${API}/air/daily?station=${q}`).then((r) => r.json()),
+  ]);
   $("pred").innerHTML = p.ready
     ? `<b>${p.station}</b> 1시간 뒤 PM10 약 <b>${p.next_pm10}</b> ${badge(p.next_grade)} (평균 오차 ±${p.avg_error})`
     : `<b>${p.station}</b> ${p.message}`;
+  // 날짜별 같은 시각 값 (DB에 쌓인 기록)
+  const diff = d.change_vs_previous_day;
+  $("daily").innerHTML = `<h4>${d.station} — 날짜별 ${d.hour}시 미세먼지 (DB에 ${d.stored_days}일치 저장)</h4>` +
+    (diff === null ? "<small>비교하려면 이틀 이상 쌓여야 합니다.</small>"
+      : `<small>전날 같은 시각보다 ${diff > 0 ? "+" : ""}${diff}</small>`) +
+    `<table><thead><tr><th>날짜</th><th>PM10</th><th>PM2.5</th></tr></thead><tbody>` +
+    d.days.map((x) => `<tr><td>${x.date}</td><td>${x.pm10 ?? "-"} ${badge(x.pm10_grade)}</td><td>${x.pm25 ?? "-"}</td></tr>`).join("") +
+    `</tbody></table>`;
 });
 
 load();
