@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>제주 미세먼지</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+  .badge { color: #fff; border-radius: 6px; padding: 1px 8px; font-size: 13px; }
+  #status { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; background: #eee; }
+  #status.ok { background: #d4edda; } #status.err { background: #f8d7da; }
+</style>
+</head>
+<body>
+<h3>제주 미세먼지 <small>(공공데이터 → FastAPI 가공 → 저장)</small></h3>
+<div id="status">연결 확인 중…</div>
+<p id="summary"></p>
+<table>
+  <thead><tr><th>측정소</th><th>시각</th><th>PM10</th><th>PM2.5</th><th>예측</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<p id="pred"></p>
+
+<script>
+// 로컬: 127.0.0.1:8000 / 배포 후에는 Railway 주소로 교체
+const API = "http://127.0.0.1:8000";
+const COLOR = { "좋음": "#2f80ed", "보통": "#27ae60", "나쁨": "#f2994a", "매우나쁨": "#eb5757" };
+const badge = (g) => g ? `<span class="badge" style="background:${COLOR[g]}">${g}</span>` : "-";
+const $ = (id) => document.getElementById(id);
+
+async function load() {
+  const status = $("status");
+  try {
+    const [s, l] = await Promise.all([
+      fetch(`${API}/air/summary`).then((r) => r.json()),
+      fetch(`${API}/air/latest`).then((r) => r.json()),
+    ]);
+    status.textContent = "백엔드 연결 성공 (" + API + ")";
+    status.className = "ok";
+    $("summary").innerHTML =
+      `측정소 ${s.stations}곳 평균 PM10 <b>${s.avg_pm10 ?? "-"}</b> ${badge(s.avg_pm10_grade)}` +
+      (s.mode === "demo" ? " <small>(연습 데이터)</small>" : "");
+    $("rows").innerHTML = l.map((r) =>
+      `<tr><td>${r.station}</td><td>${r.time.slice(11)}</td>
+       <td>${r.pm10 ?? "-"} ${badge(r.pm10_grade)}</td>
+       <td>${r.pm25 ?? "-"} ${badge(r.pm25_grade)}</td>
+       <td><button data-st="${r.station}">1시간 뒤?</button></td></tr>`).join("");
+  } catch (e) {
+    status.textContent = "백엔드에 연결할 수 없습니다: " + e;
+    status.className = "err";
+  }
+}
+
+document.addEventListener("click", async (ev) => {
+  const st = ev.target.dataset && ev.target.dataset.st;
+  if (!st) return;
+  const p = await fetch(`${API}/air/predict?station=${encodeURIComponent(st)}`).then((r) => r.json());
+  $("pred").innerHTML = p.ready
+    ? `<b>${p.station}</b> 1시간 뒤 PM10 약 <b>${p.next_pm10}</b> ${badge(p.next_grade)} (평균 오차 ±${p.avg_error})`
+    : `<b>${p.station}</b> ${p.message}`;
+});
+
+load();
+</script>
+</body>
+</html>
