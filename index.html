@@ -24,8 +24,10 @@
 <p id="pred"></p>
 
 <script>
-// 로컬: 127.0.0.1:8000 / 배포 후에는 Railway 주소로 교체
-const API = "http://127.0.0.1:8000";
+// 내 컴퓨터(localhost)에서 열면 로컬 백엔드, 그 외(Vercel 등)에서 열면 Railway 백엔드
+const RAILWAY_URL = "https://day3backend-production-cf40bb92.up.railway.app";
+const IS_LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+const API = IS_LOCAL ? "http://127.0.0.1:8000" : RAILWAY_URL;
 const COLOR = { "좋음": "#2f80ed", "보통": "#27ae60", "나쁨": "#f2994a", "매우나쁨": "#eb5757" };
 const badge = (g) => g ? `<span class="badge" style="background:${COLOR[g]}">${g}</span>` : "-";
 const $ = (id) => document.getElementById(id);
