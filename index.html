@@ -48,7 +48,13 @@ async function load() {
        <td>${r.pm25 ?? "-"} ${badge(r.pm25_grade)}</td>
        <td><button data-st="${r.station}">1시간 뒤?</button></td></tr>`).join("");
   } catch (e) {
-    status.textContent = "백엔드에 연결할 수 없습니다: " + e;
+    let hint = "";
+    if (location.protocol === "file:") {
+      hint = " → 파일을 더블클릭해서 열었습니다. 주소창을 http://localhost:3000 으로 열어 주세요.";
+    } else {
+      hint = " → 백엔드(" + API + ")가 켜져 있는지, 터미널에 'Application startup complete'가 떴는지 확인하세요.";
+    }
+    status.textContent = "백엔드에 연결할 수 없습니다: " + e + hint;
     status.className = "err";
   }
 }
