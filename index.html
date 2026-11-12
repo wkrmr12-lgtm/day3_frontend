@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>제주 미세먼지</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
   body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; }
   table { border-collapse: collapse; width: 100%; }
@@ -11,12 +12,18 @@
   .badge { color: #fff; border-radius: 6px; padding: 1px 8px; font-size: 13px; }
   #status { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; background: #eee; }
   #status.ok { background: #d4edda; } #status.err { background: #f8d7da; }
+  #map { height: 460px; border-radius: 12px; margin: 8px 0 20px; }
+  .pop { line-height: 1.7; min-width: 190px; }
+  .pop small { color: #666; }
+  .pop .err { color: #d00; }
 </style>
 </head>
 <body>
 <h3>제주 미세먼지 <small>(공공데이터 → FastAPI 가공 → 저장)</small></h3>
 <div id="status">연결 확인 중…</div>
 <p id="summary"></p>
+<h4 style="margin-bottom:0">지도를 눌러 보세요 — 가장 가까운 측정소의 미세먼지</h4>
+<div id="map"></div>
 <table>
   <thead><tr><th>측정소</th><th>시각</th><th>PM10</th><th>PM2.5</th><th>예측</th></tr></thead>
   <tbody id="rows"></tbody>
@@ -24,6 +31,7 @@
 <p id="pred"></p>
 <div id="daily"></div>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 // 내 컴퓨터(localhost)에서 열면 로컬 백엔드, 그 외(Vercel 등)에서 열면 Railway 백엔드
 const RAILWAY_URL = "https://day3backend-production-cf40bb92.up.railway.app";
@@ -33,6 +41,84 @@ const COLOR = { "좋음": "#2f80ed", "보통": "#27ae60", "나쁨": "#f2994a", "
 const badge = (g) => g ? `<span class="badge" style="background:${COLOR[g]}">${g}</span>` : "-";
 const $ = (id) => document.getElementById(id);
 
+
+// ───────── 지도: 누른 곳 → 서버 /air/near → 말풍선 ─────────
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const map = L.map("map").setView([33.38, 126.55], 10);   // 제주 중심
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 18, attribution: "&copy; OpenStreetMap contributors",
+}).addTo(map);
+
+const stationLayer = L.layerGroup().addTo(map);  // 측정소 동그라미
+let line = null;                                 // 누른 곳 ↔ 측정소 점선
+let pickId = 0;                                  // 연속 클릭 시 늦게 온 응답 무시용
+
+function drawStations(list) {
+  stationLayer.clearLayers();
+  list.filter((r) => r.lat != null).forEach((r) => {
+    L.circleMarker([r.lat, r.lng], {
+      radius: 10, color: "#fff", weight: 2, fillOpacity: 0.9,
+      fillColor: COLOR[r.pm10_grade] || "#999",   // 값이 없으면 회색
+      bubblingMouseEvents: false,                 // 동그라미 클릭이 지도 클릭으로 또 전달되지 않게
+    }).bindTooltip(`${esc(r.station)} ${r.pm10 ?? "-"}`)
+      .on("click", (e) => pick(e.latlng))
+      .addTo(stationLayer);
+  });
+}
+
+async function pick(latlng) {
+  const id = ++pickId;
+  const { lat, lng } = latlng;
+  if (line) { map.removeLayer(line); line = null; }
+  const box = document.createElement("div");
+  box.className = "pop";
+  box.textContent = "불러오는 중…";
+  const popup = L.popup().setLatLng(latlng).setContent(box).openOn(map);
+  try {
+    const r = await fetch(`${API}/air/near?lat=${lat}&lng=${lng}`);
+    const d = await r.json();
+    if (id !== pickId) return;                    // 그새 다른 곳을 눌렀으면 버림
+    if (!r.ok) throw new Error(d.detail || "오류 " + r.status);
+    box.innerHTML =
+      `<b>${esc(d.station)}</b> 측정소 <small>(여기서 ${d.distance_km}km · ${esc(d.time.slice(11))})</small><br>` +
+      `미세먼지 PM10 <b>${d.pm10 ?? "-"}</b> ${badge(d.pm10_grade)}<br>` +
+      `초미세먼지 PM2.5 <b>${d.pm25 ?? "-"}</b> ${badge(d.pm25_grade)}<br>` +
+      `<span class="predict"><button type="button">1시간 뒤?</button></span>`;
+    box.querySelector("button").onclick = (ev) => {
+      ev.stopPropagation();                       // 지도 클릭으로 전달되지 않게
+      predictInPopup(d.station, box.querySelector(".predict"), id);
+    };
+    if (d.lat != null) {
+      line = L.polyline([[lat, lng], [d.lat, d.lng]], { color: "#555", weight: 2, dashArray: "5 6" }).addTo(map);
+    }
+    popup.update();
+  } catch (e) {
+    if (id !== pickId) return;
+    box.innerHTML = `<span class="err">${esc(e.message || e)}</span>`;
+    popup.update();
+  }
+}
+
+async function predictInPopup(station, el, id) {
+  el.textContent = "예측 중…";
+  try {
+    const p = await fetch(`${API}/air/predict?station=${encodeURIComponent(station)}`).then((r) => r.json());
+    if (id !== pickId) return;
+    el.innerHTML = p.ready
+      ? `1시간 뒤 PM10 약 <b>${p.next_pm10}</b> ${badge(p.next_grade)} <small>(±${p.avg_error})</small>`
+      : esc(p.message || "예측할 수 없어요");
+  } catch (e) {
+    el.innerHTML = `<span class="err">${esc(e.message || e)}</span>`;
+  }
+}
+
+map.on("click", (e) => {                  // 지도 아무 곳이나 누르기
+  // 말풍선 안(버튼 등)을 누른 건 지도 클릭이 아니다 → 무시
+  // (버튼이 눌린 뒤 사라질 수 있어서 target.closest 대신 클릭 경로로 확인)
+  if (e.originalEvent.composedPath().some((el) => el.classList && el.classList.contains("leaflet-popup"))) return;
+  pick(e.latlng);
+});
+
 async function load() {
   const status = $("status");
   try {
@@ -40,6 +126,7 @@ async function load() {
       fetch(`${API}/air/summary`).then((r) => r.json()),
       fetch(`${API}/air/latest`).then((r) => r.json()),
     ]);
+    drawStations(l);
     status.textContent = "백엔드 연결 성공 (" + API + ")";
     status.className = "ok";
     $("summary").innerHTML =
