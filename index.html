@@ -12,7 +12,9 @@
   .badge { color: #fff; border-radius: 6px; padding: 1px 8px; font-size: 13px; }
   #status { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; background: #eee; }
   #status.ok { background: #d4edda; } #status.err { background: #f8d7da; }
-  #map { height: 460px; border-radius: 12px; margin: 8px 0 20px; }
+  #map { height: 460px; border-radius: 12px; margin: 8px 0 6px; }
+  #map.leaflet-container { cursor: pointer; }          /* 눌러도 되는 지도: 손가락 커서 */
+  #hint { margin: 0 0 20px; color: #666; font-size: 13px; }
   .pop { line-height: 1.7; min-width: 190px; }
   .pop small { color: #666; }
   .pop .err { color: #d00; }
@@ -24,6 +26,7 @@
 <p id="summary"></p>
 <h4 style="margin-bottom:0">지도를 눌러 보세요 — 가장 가까운 측정소의 미세먼지</h4>
 <div id="map"></div>
+<p id="hint">지도 아무 곳이나 누르거나, 색 동그라미(측정소)를 눌러 보세요.</p>
 <table>
   <thead><tr><th>측정소</th><th>시각</th><th>PM10</th><th>PM2.5</th><th>예측</th></tr></thead>
   <tbody id="rows"></tbody>
@@ -42,7 +45,7 @@ const badge = (g) => g ? `<span class="badge" style="background:${COLOR[g]}">${g
 const $ = (id) => document.getElementById(id);
 
 
-// ───────── 지도: 누른 곳 → 서버 /air/near → 말풍선 ─────────
+// ───────── 지도: 누른 곳 → 가장 가까운 측정소(화면에서 계산) → 말풍선 ─────────
 const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const map = L.map("map").setView([33.38, 126.55], 10);   // 제주 중심
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -66,37 +69,66 @@ function drawStations(list) {
   });
 }
 
-async function pick(latlng) {
+// 측정소 이름 → (위도, 경도). 읍·면·동 중심 근사값. 서버가 lat/lng를 주면 서버 값을 우선 쓴다.
+const COORDS = {
+  "이도동": [33.5040, 126.5350], "일도동": [33.5130, 126.5320], "연동": [33.4890, 126.4930],
+  "노형로": [33.4840, 126.4780], "화북동": [33.5180, 126.5680], "제주항": [33.5170, 126.5290],
+  "조천읍": [33.5380, 126.6350], "구좌읍": [33.5560, 126.8400], "애월읍": [33.4630, 126.3290],
+  "한림읍": [33.4110, 126.2690], "한경면": [33.3380, 126.1760], "고산리": [33.2960, 126.1630],
+  "대정읍": [33.2260, 126.2520], "안덕면": [33.2520, 126.3270], "강정동": [33.2400, 126.4830],
+  "대륜동": [33.2440, 126.5100], "동홍동": [33.2600, 126.5700], "남원읍": [33.2790, 126.7190],
+  "표선면": [33.3260, 126.8300], "성산읍": [33.4370, 126.9000],
+};
+let STATIONS = [];   // 좌표가 붙은 측정소 목록 (load()가 채움)
+
+function withCoords(list) {
+  return list.map((r) => {
+    const c = COORDS[r.station];
+    return { ...r, lat: r.lat ?? (c ? c[0] : null), lng: r.lng ?? (c ? c[1] : null) };
+  });
+}
+
+// 두 지점 사이 거리(km) — 하버사인
+function distKm(lat1, lng1, lat2, lng2) {
+  const rad = (x) => (x * Math.PI) / 180;
+  const a = Math.sin(rad(lat2 - lat1) / 2) ** 2 +
+    Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(rad(lng2 - lng1) / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(a));
+}
+
+function nearest(lat, lng) {
+  let best = null, bestD = null;
+  STATIONS.forEach((r) => {
+    if (r.lat == null) return;
+    const d = distKm(lat, lng, r.lat, r.lng);
+    if (bestD === null || d < bestD) { best = r; bestD = d; }
+  });
+  return { best, km: bestD };
+}
+
+function pick(latlng) {
   const id = ++pickId;
   const { lat, lng } = latlng;
   if (line) { map.removeLayer(line); line = null; }
   const box = document.createElement("div");
   box.className = "pop";
-  box.textContent = "불러오는 중…";
-  const popup = L.popup().setLatLng(latlng).setContent(box).openOn(map);
-  try {
-    const r = await fetch(`${API}/air/near?lat=${lat}&lng=${lng}`);
-    const d = await r.json();
-    if (id !== pickId) return;                    // 그새 다른 곳을 눌렀으면 버림
-    if (!r.ok) throw new Error(d.detail || "오류 " + r.status);
-    box.innerHTML =
-      `<b>${esc(d.station)}</b> 측정소 <small>(여기서 ${d.distance_km}km · ${esc(d.time.slice(11))})</small><br>` +
-      `미세먼지 PM10 <b>${d.pm10 ?? "-"}</b> ${badge(d.pm10_grade)}<br>` +
-      `초미세먼지 PM2.5 <b>${d.pm25 ?? "-"}</b> ${badge(d.pm25_grade)}<br>` +
-      `<span class="predict"><button type="button">1시간 뒤?</button></span>`;
-    box.querySelector("button").onclick = (ev) => {
-      ev.stopPropagation();                       // 지도 클릭으로 전달되지 않게
-      predictInPopup(d.station, box.querySelector(".predict"), id);
-    };
-    if (d.lat != null) {
-      line = L.polyline([[lat, lng], [d.lat, d.lng]], { color: "#555", weight: 2, dashArray: "5 6" }).addTo(map);
-    }
-    popup.update();
-  } catch (e) {
-    if (id !== pickId) return;
-    box.innerHTML = `<span class="err">${esc(e.message || e)}</span>`;
-    popup.update();
+  const { best: d, km } = nearest(lat, lng);
+  if (!d) {
+    box.innerHTML = '<span class="err">측정소 데이터를 아직 불러오지 못했어요. 잠시 후 다시 눌러 주세요.</span>';
+    L.popup().setLatLng(latlng).setContent(box).openOn(map);
+    return;
   }
+  box.innerHTML =
+    `<b>${esc(d.station)}</b> 측정소 <small>(여기서 ${km.toFixed(1)}km · ${esc(d.time.slice(11))})</small><br>` +
+    `미세먼지 PM10 <b>${d.pm10 ?? "-"}</b> ${badge(d.pm10_grade)}<br>` +
+    `초미세먼지 PM2.5 <b>${d.pm25 ?? "-"}</b> ${badge(d.pm25_grade)}<br>` +
+    `<span class="predict"><button type="button">1시간 뒤?</button></span>`;
+  box.querySelector("button").onclick = (ev) => {
+    ev.stopPropagation();                         // 지도 클릭으로 전달되지 않게
+    predictInPopup(d.station, box.querySelector(".predict"), id);
+  };
+  L.popup().setLatLng(latlng).setContent(box).openOn(map);
+  line = L.polyline([[lat, lng], [d.lat, d.lng]], { color: "#555", weight: 2, dashArray: "5 6" }).addTo(map);
 }
 
 async function predictInPopup(station, el, id) {
@@ -126,7 +158,8 @@ async function load() {
       fetch(`${API}/air/summary`).then((r) => r.json()),
       fetch(`${API}/air/latest`).then((r) => r.json()),
     ]);
-    drawStations(l);
+    STATIONS = withCoords(l);
+    drawStations(STATIONS);
     status.textContent = "백엔드 연결 성공 (" + API + ")";
     status.className = "ok";
     $("summary").innerHTML =
